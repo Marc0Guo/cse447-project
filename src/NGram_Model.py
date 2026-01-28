@@ -21,20 +21,19 @@ class MyModel:
 
     @classmethod
     def load_training_data(cls):
-        # Load from example/input.txt
         data = []
         input_file = '../../example/input.txt'
+        # TODO: change this to load real training data
         if os.path.exists(input_file):
-            with open(input_file) as f:
+            with open(input_file, encoding='utf-8') as f:
                 for line in f:
                     data.append(line.strip())
         return data
 
     @classmethod
     def load_test_data(cls, fname):
-        # your code here
         data = []
-        with open(fname) as f:
+        with open(fname, encoding='utf-8') as f:
             for line in f:
                 inp = line[:-1]  # the last character is a newline
                 data.append(inp)
@@ -42,12 +41,11 @@ class MyModel:
 
     @classmethod
     def write_pred(cls, preds, fname):
-        with open(fname, 'wt') as f:
+        with open(fname, 'wt', encoding='utf-8') as f:
             for p in preds:
                 f.write('{}\n'.format(p))
 
     def run_train(self, data, work_dir):
-        # your code here
         print(f"Training on {len(data)} lines of text...")
         for line in data:
             for char in line:
@@ -93,10 +91,8 @@ class MyModel:
         return candidates[:3]
 
     def run_pred(self, data):
-        # your code here
         preds = []
         for inp in data:
-            # this model just predicts a random character each time
             top_guesses = self._get_top_candidates(inp)
             preds.append(''.join(top_guesses))
         return preds
@@ -129,8 +125,6 @@ class MyModel:
                 history = history[-self.n:]
 
     def save(self, work_dir):
-        # your code here
-        # this particular model has nothing to save, but for demonstration purposes we will save a blank file
         model_path = os.path.join(work_dir, 'model.checkpoint')
         print(f'Saving model to {model_path}')
 
@@ -143,8 +137,6 @@ class MyModel:
 
     @classmethod
     def load(cls, work_dir):
-        # your code here
-        # this particular model has nothing to load, but for demonstration purposes we will load a blank file
         model_path = os.path.join(work_dir, 'model.checkpoint')
         print(f"Loading model from {model_path}...")
 
@@ -194,5 +186,8 @@ if __name__ == '__main__':
         print('Writing predictions to {}'.format(args.test_output))
         assert len(pred) == len(test_data), 'Expected {} predictions but got {}'.format(len(test_data), len(pred))
         model.write_pred(pred, args.test_output)
+    elif args.mode == 'interactive':
+        model = MyModel.load(args.work_dir)
+        model.run_interactive()
     else:
         raise NotImplementedError('Unknown mode {}'.format(args.mode))
