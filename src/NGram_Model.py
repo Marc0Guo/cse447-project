@@ -22,7 +22,7 @@ class MyModel:
     @classmethod
     def load_training_data(cls):
         data = []
-        input_file = '../../example/input.txt'
+        input_file = 'example/input.txt'
         # TODO: change this to load real training data
         if os.path.exists(input_file):
             with open(input_file, encoding='utf-8') as f:
