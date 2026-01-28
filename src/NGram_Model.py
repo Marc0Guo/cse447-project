@@ -41,7 +41,7 @@ class MyModel:
 
     @classmethod
     def write_pred(cls, preds, fname):
-        with open(fname, 'wt', encoding='utf-8') as f:
+        with open(fname, 'wt', encoding='utf-8', newline='\n') as f:
             for p in preds:
                 f.write('{}\n'.format(p))
 
@@ -156,7 +156,7 @@ class MyModel:
 
 if __name__ == '__main__':
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
-    parser.add_argument('mode', choices=('train', 'test'), help='what to run')
+    parser.add_argument('mode', choices=('train', 'test', 'interactive'), help='what to run')
     parser.add_argument('--work_dir', help='where to save', default='work')
     parser.add_argument('--test_data', help='path to test data', default='example/input.txt')
     parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
