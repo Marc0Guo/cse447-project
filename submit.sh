@@ -14,8 +14,9 @@ python src/NGram_Model.py train --work_dir work
 # make predictions on example data submit it in pred.txt
 python src/NGram_Model.py test --work_dir work --test_data example/input.txt --test_output submit/pred.txt
 
-# submit docker file
+# submit docker file and requirements
 cp Dockerfile submit/Dockerfile
+cp requirements.txt submit/requirements.txt
 
 # submit source code
 cp -r src submit/src
