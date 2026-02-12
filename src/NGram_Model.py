@@ -8,6 +8,7 @@ import collections
 import math
 from tqdm import tqdm
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from tqdm import tqdm
 
 
 class MyModel:
@@ -59,13 +60,26 @@ class MyModel:
         return data
 
     @classmethod
-    def load_test_data(cls, split='test'):
+    def load_test_data(cls, fpath=None, split='test'):
         """
-        Load test data from Wikitext dataset.
+        Load test data from a file or Wikitext dataset.
 
         Args:
-            split: 'test' or 'validation' for Wikitext
+            fpath: path to input file (if provided, loads from file instead of Wikitext)
+            split: 'test' or 'validation' for Wikitext (only used if fpath is None)
         """
+        # If file path is provided, load from file
+        if fpath:
+            print(f"Loading test data from {fpath}...")
+            data = []
+            with open(fpath, 'rt', encoding='utf-8') as f:
+                for line in f:
+                    line = line.rstrip('\n\r')  # remove newline but keep the string
+                    data.append(line)
+            print(f"Loaded {len(data)} test samples from file")
+            return data
+        
+        # Otherwise, load from Wikitext dataset
         from datasets import load_dataset
 
         print(f"Loading Wikitext {split} split from HuggingFace...")
@@ -127,6 +141,7 @@ class MyModel:
             print(f"Vocabulary size: {len(self.vocab)}")
 
         # Second pass: collect n-gram counts (only for vocab characters)
+        print("Pass 2/2: Building n-gram counts...")
         context_char_pairs = set()  # for continuation counts
 
         for line in tqdm(data, desc="Building N-grams", unit="lines"):
