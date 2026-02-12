@@ -7,6 +7,7 @@ import pickle
 import collections
 import math
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from tqdm import tqdm
 
 
 class MyModel:
@@ -58,13 +59,26 @@ class MyModel:
         return data
 
     @classmethod
-    def load_test_data(cls, split='test'):
+    def load_test_data(cls, fpath=None, split='test'):
         """
-        Load test data from Wikitext dataset.
+        Load test data from a file or Wikitext dataset.
 
         Args:
-            split: 'test' or 'validation' for Wikitext
+            fpath: path to input file (if provided, loads from file instead of Wikitext)
+            split: 'test' or 'validation' for Wikitext (only used if fpath is None)
         """
+        # If file path is provided, load from file
+        if fpath:
+            print(f"Loading test data from {fpath}...")
+            data = []
+            with open(fpath, 'rt', encoding='utf-8') as f:
+                for line in f:
+                    line = line.rstrip('\n\r')  # remove newline but keep the string
+                    data.append(line)
+            print(f"Loaded {len(data)} test samples from file")
+            return data
+        
+        # Otherwise, load from Wikitext dataset
         from datasets import load_dataset
 
         print(f"Loading Wikitext {split} split from HuggingFace...")
@@ -126,9 +140,10 @@ class MyModel:
             print(f"Vocabulary size: {len(self.vocab)}")
 
         # Second pass: collect n-gram counts (only for vocab characters)
+        print("Pass 2/2: Building n-gram counts...")
         context_char_pairs = set()  # for continuation counts
 
-        for line in data:
+        for line in tqdm(data, desc="Building n-grams", unit="lines"):
             # Filter line to only include vocab characters
             filtered_line = ''.join([c for c in line if c in self.vocab])
 
@@ -387,6 +402,7 @@ if __name__ == '__main__':
     parser.add_argument('mode', choices=('train', 'test', 'evaluate', 'interactive'),
                        help='train: train model | test: generate predictions | evaluate: test accuracy | interactive: interactive mode')
     parser.add_argument('--work_dir', help='directory to save/load model checkpoint', default='work')
+    parser.add_argument('--test_data', help='path to test input file (if not provided, uses Wikitext)', default=None)
     parser.add_argument('--test_output', help='path to write test predictions (for test mode)', default='pred.txt')
     parser.add_argument('--n', type=int, default=4, help='n-gram order (3 or 4 recommended)')
     parser.add_argument('--vocab_size', type=int, default=1000, help='vocabulary size (0 for unlimited)')
@@ -429,9 +445,14 @@ if __name__ == '__main__':
         print('Loading model checkpoint...')
         model = MyModel.load(args.work_dir)
 
-        # Load test data from Wikitext
-        print(f'Loading Wikitext {args.split} split...')
-        test_data = MyModel.load_test_data(split=args.split)
+        # Load test data from file or Wikitext
+        if args.test_data:
+            # Load from file
+            test_data = MyModel.load_test_data(fpath=args.test_data)
+        else:
+            # Load from Wikitext dataset
+            print(f'Loading Wikitext {args.split} split...')
+            test_data = MyModel.load_test_data(split=args.split)
 
         # Limit samples if requested
         if args.max_samples > 0 and len(test_data) > args.max_samples:
