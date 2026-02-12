@@ -8,7 +8,6 @@ import collections
 import math
 from tqdm import tqdm
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
-from tqdm import tqdm
 
 
 class MyModel:
