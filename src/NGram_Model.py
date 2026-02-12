@@ -6,6 +6,7 @@ import random
 import pickle
 import collections
 import math
+from tqdm import tqdm
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 
@@ -128,7 +129,7 @@ class MyModel:
         # Second pass: collect n-gram counts (only for vocab characters)
         context_char_pairs = set()  # for continuation counts
 
-        for line in data:
+        for line in tqdm(data, desc="Building N-grams", unit="lines"):
             # Filter line to only include vocab characters
             filtered_line = ''.join([c for c in line if c in self.vocab])
 
@@ -387,6 +388,7 @@ if __name__ == '__main__':
     parser.add_argument('mode', choices=('train', 'test', 'evaluate', 'interactive'),
                        help='train: train model | test: generate predictions | evaluate: test accuracy | interactive: interactive mode')
     parser.add_argument('--work_dir', help='directory to save/load model checkpoint', default='work')
+    parser.add_argument('--test_data', help='path to local test data file')
     parser.add_argument('--test_output', help='path to write test predictions (for test mode)', default='pred.txt')
     parser.add_argument('--n', type=int, default=4, help='n-gram order (3 or 4 recommended)')
     parser.add_argument('--vocab_size', type=int, default=1000, help='vocabulary size (0 for unlimited)')
@@ -429,9 +431,14 @@ if __name__ == '__main__':
         print('Loading model checkpoint...')
         model = MyModel.load(args.work_dir)
 
-        # Load test data from Wikitext
-        print(f'Loading Wikitext {args.split} split...')
-        test_data = MyModel.load_test_data(split=args.split)
+        # Load test data (local file has priority)
+        if args.test_data and os.path.exists(args.test_data):
+            print(f'Reading local test data from {args.test_data}')
+            with open(args.test_data, 'r', encoding='utf-8') as f:
+                test_data = [line.strip() for line in f]
+        else:
+            print(f'Loading Wikitext {args.split} split from HuggingFace...')
+            test_data = MyModel.load_test_data(split=args.split)
 
         # Limit samples if requested
         if args.max_samples > 0 and len(test_data) > args.max_samples:
