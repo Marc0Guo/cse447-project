@@ -1,1 +1,2 @@
-datasets>=2.0.0
+# No external dependencies needed for prediction.
+# For training locally, install: pip install datasets tqdm

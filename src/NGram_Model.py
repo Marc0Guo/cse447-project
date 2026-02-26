@@ -5,45 +5,54 @@ import string
 import random
 import pickle
 import collections
-import math
-from tqdm import tqdm
+import re
+import time
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from tqdm import tqdm
 
 
 class MyModel:
     """
-    N-gram model with Kneser-Ney smoothing for character prediction.
-    With backoff mechanism and vocabulary filtering.
+    N-gram model with backoff for character prediction.
+    Uses direct count lookup for fast O(1) prediction per context length.
     """
-    def __init__(self, n=4, vocab_size=1000, discount=0.75):
+    _ws_re = re.compile(r'\s+')
+
+    def __init__(self, n=6):
         self.n = n
-        self.vocab_size = vocab_size  # keep only top N characters
-        self.discount = discount  # Kneser-Ney discount parameter
-
-        # N-gram counts: ngram_counts[context][next_char] = count
+        # ngram_counts[context_string] = Counter({next_char: count})
+        # Contexts of lengths 1..n-1 are all stored here
         self.ngram_counts = collections.defaultdict(collections.Counter)
-
-        # Unigram counts
         self.unigram_counts = collections.Counter()
-
-        # Continuation counts for Kneser-Ney (how many unique contexts each char appears in)
-        self.continuation_counts = collections.defaultdict(collections.Counter)
-
-        # Total continuation count for normalization
-        self.total_continuation = 0
-
-        # Vocabulary (will be set after training)
-        self.vocab = None
-
-        # Fallback characters for extreme cases
+        self.vocab = set()
         self.fallback_chars = [' ', 'e', 't', 'a', 'o', 'i', 'n', 's', 'r', 'h']
+        # Pre-computed top-3 predictions per context (built after training/loading)
+        self._top3 = {}
+        self._unigram_top3 = []
+
+    @staticmethod
+    def _normalize(text):
+        """Normalize: lowercase and collapse whitespace."""
+        text = text.lower()
+        text = MyModel._ws_re.sub(' ', text)
+        return text
+
+    def _normalize_tail(self, text, length):
+        """Normalize only the last `length` characters of text. Much faster for long inputs."""
+        tail = text[-length:] if len(text) > length else text
+        return tail.lower() if ' ' not in tail and '\t' not in tail and '\n' not in tail \
+            else MyModel._ws_re.sub(' ', tail.lower())
+
+    def _build_top3_cache(self):
+        """Pre-compute top-3 next chars for every stored context. Call after training or loading."""
+        self._top3 = {}
+        for ctx, counter in self.ngram_counts.items():
+            self._top3[ctx] = [ch for ch, _ in counter.most_common(3)]
+        self._unigram_top3 = [ch for ch, _ in self.unigram_counts.most_common(3)]
 
     @classmethod
     def load_training_data(cls):
-        """
-        Load training data from Wikitext dataset.
-        Requires: pip install datasets
-        """
+        """Load training data from Wikitext dataset (requires: pip install datasets)."""
         from datasets import load_dataset
 
         print("Loading Wikitext training dataset from HuggingFace...")
@@ -52,7 +61,7 @@ class MyModel:
         data = []
         for item in dataset:
             text = item['text'].strip()
-            if text and len(text) > 0:  # skip empty lines
+            if text:
                 data.append(text)
 
         print(f"Loaded {len(data)} lines from Wikitext training set")
@@ -60,58 +69,34 @@ class MyModel:
 
     @classmethod
     def load_test_data(cls, fpath=None, split='test'):
-        """
-        Load test data from a file or Wikitext dataset.
-
-        Args:
-            fpath: path to input file (if provided, loads from file instead of Wikitext)
-            split: 'test' or 'validation' for Wikitext (only used if fpath is None)
-        """
-        # If file path is provided, load from file
         if fpath:
-            print(f"Loading test data from {fpath}...")
             data = []
-            with open(fpath, 'rt', encoding='utf-8') as f:
+            with open(fpath, 'rt', encoding='utf-8', errors='ignore') as f:
                 for line in f:
-                    line = line.rstrip('\n\r')  # remove newline but keep the string
-                    data.append(line)
-            print(f"Loaded {len(data)} test samples from file")
+                    data.append(line.rstrip('\n\r'))
             return data
-        
-        # Otherwise, load from Wikitext dataset
-        from datasets import load_dataset
 
+        from datasets import load_dataset
         print(f"Loading Wikitext {split} split from HuggingFace...")
         dataset = load_dataset('Salesforce/wikitext', 'wikitext-103-raw-v1', split=split)
-
         data = []
         for item in dataset:
             text = item['text'].strip()
-            if text and len(text) > 1:  # need at least 2 chars (input + answer)
-                data.append(text[:-1])  # input is all but last char
-
+            if text and len(text) > 1:
+                data.append(text[:-1])
         print(f"Loaded {len(data)} test samples from Wikitext {split} split")
         return data
 
     @classmethod
     def load_test_answers(cls, split='test'):
-        """
-        Load test answers (ground truth next characters) from Wikitext.
-
-        Args:
-            split: 'test' or 'validation' for Wikitext
-        """
         from datasets import load_dataset
-
         print(f"Loading Wikitext {split} answers from HuggingFace...")
         dataset = load_dataset('Salesforce/wikitext', 'wikitext-103-raw-v1', split=split)
-
         answers = []
         for item in dataset:
             text = item['text'].strip()
             if text and len(text) > 1:
-                answers.append(text[-1])  # answer is last char
-
+                answers.append(text[-1])
         print(f"Loaded {len(answers)} answers from Wikitext {split} split")
         return answers
 
@@ -122,167 +107,105 @@ class MyModel:
                 f.write('{}\n'.format(p))
 
     def run_train(self, data, work_dir):
-        print(f"Training on {len(data)} lines of text...")
+        total = len(data)
+        print(f"Training on {total} lines...")
+        t_start = time.perf_counter()
+        total_chars = 0
 
-        # First pass: collect all character counts
-        print("Pass 1/2: Counting characters...")
-        all_char_counts = collections.Counter()
-        for line in tqdm(data, desc="Counting chars", unit="lines"):
-            for char in line:
-                all_char_counts[char] += 1
-
-        # Build vocabulary: keep top N most frequent characters
-        if self.vocab_size and self.vocab_size < len(all_char_counts):
-            self.vocab = set([char for char, _ in all_char_counts.most_common(self.vocab_size)])
-            print(f"Vocabulary size: {len(self.vocab)} (filtered from {len(all_char_counts)})")
-        else:
-            self.vocab = set(all_char_counts.keys())
-            print(f"Vocabulary size: {len(self.vocab)}")
-
-        # Second pass: collect n-gram counts (only for vocab characters)
-        print("Pass 2/2: Building n-gram counts...")
-        context_char_pairs = set()  # for continuation counts
-
-        for line in tqdm(data, desc="Building N-grams", unit="lines"):
-            # Filter line to only include vocab characters
-            filtered_line = ''.join([c for c in line if c in self.vocab])
-
-            if len(filtered_line) == 0:
+        for line in tqdm(data, desc="Training", unit="line"):
+            text = self._normalize(line)
+            if not text:
                 continue
 
+            total_chars += len(text)
+
             # Collect unigram counts
-            for char in filtered_line:
-                self.unigram_counts[char] += 1
+            for ch in text:
+                self.unigram_counts[ch] += 1
+                self.vocab.add(ch)
 
-            # Collect n-gram counts for all orders
-            for i in range(len(filtered_line) - 1):
-                next_char = filtered_line[i + 1]
+            # Collect n-gram counts for all context lengths
+            for i in range(len(text)):
+                ch = text[i]
+                max_ctx = min(self.n - 1, i)
+                for ctx_len in range(1, max_ctx + 1):
+                    ctx = text[i - ctx_len:i]
+                    self.ngram_counts[ctx][ch] += 1
 
-                # Collect counts for different n-gram orders (1 to n-1)
-                for order in range(1, self.n):
-                    if i >= order - 1:
-                        context = filtered_line[i - order + 1:i + 1]
-                        self.ngram_counts[context][next_char] += 1
+        elapsed = time.perf_counter() - t_start
+        print(f"Training done in {elapsed:.1f}s ({total_chars:,} chars, {total_chars/elapsed:,.0f} chars/s)")
+        print(f"Vocab size: {len(self.vocab)}")
+        print(f"Unique contexts: {len(self.ngram_counts)}")
+        print(f"Total chars: {total_chars:,}")
 
-                        # Track context-char pairs for continuation counts
-                        if order > 1:  # only for bigrams and higher
-                            context_char_pairs.add((context, next_char))
-
-        # Calculate continuation counts for Kneser-Ney
-        # continuation_counts[context][char] = number of unique contexts where (context, char) appears
-        for context, char in context_char_pairs:
-            # For a given suffix, count how many unique prefixes it has
-            if len(context) > 1:
-                suffix = context[1:]
-                self.continuation_counts[suffix][char] += 1
-
-        # Calculate total continuation count (for unigram continuation probability)
-        self.total_continuation = sum(sum(counts.values()) for counts in self.continuation_counts.values())
-
-        print(f"Collected {len(self.ngram_counts)} unique contexts")
-        print(f"Total unigrams: {sum(self.unigram_counts.values())}")
-        print(f"Total continuation count: {self.total_continuation}")
-
-    def _kneser_ney_prob(self, context, char):
-        """
-        Calculate Kneser-Ney smoothed probability for char given context.
-        Uses recursive backoff with interpolation.
-        """
-        if not self.vocab or char not in self.vocab:
-            return 1e-10  # very small probability for OOV characters
-
-        # Base case: unigram (use continuation probability)
-        if len(context) == 0:
-            if self.total_continuation > 0:
-                # Continuation probability: how many unique contexts this char appears in
-                continuation_sum = sum(self.continuation_counts[ctx].get(char, 0)
-                                      for ctx in self.continuation_counts)
-                return max(continuation_sum / self.total_continuation, 1e-10)
-            else:
-                # Fallback to uniform unigram
-                total = sum(self.unigram_counts.values())
-                return self.unigram_counts.get(char, 1) / (total + len(self.vocab)) if total > 0 else 1e-10
-
-        # Higher-order n-grams
-        count_context_char = self.ngram_counts[context].get(char, 0)
-        count_context = sum(self.ngram_counts[context].values())
-
-        if count_context > 0:
-            # Discounted probability
-            discounted_prob = max(count_context_char - self.discount, 0.0) / count_context
-
-            # Backoff weight (lambda)
-            num_unique_continuations = len(self.ngram_counts[context])
-            lambda_weight = (self.discount * num_unique_continuations) / count_context
-
-            # Recursive backoff to lower-order model
-            shorter_context = context[1:] if len(context) > 1 else ""
-            backoff_prob = self._kneser_ney_prob(shorter_context, char)
-
-            return discounted_prob + lambda_weight * backoff_prob
-        else:
-            # Pure backoff (no discounting needed)
-            shorter_context = context[1:] if len(context) > 1 else ""
-            return self._kneser_ney_prob(shorter_context, char)
+        t_cache = time.perf_counter()
+        print("Building top-3 prediction cache...")
+        self._build_top3_cache()
+        print(f"Cache built in {time.perf_counter() - t_cache:.2f}s")
 
     def _get_top_candidates(self, history):
         """
-        Get top 3 character predictions using Kneser-Ney smoothing.
-        Uses efficient hash table lookups.
+        Fast top-3 prediction using pre-computed cache with backoff.
         """
-        # Filter history to only include vocab characters
-        if self.vocab:
-            filtered_history = ''.join([c for c in history if c in self.vocab])
-        else:
-            filtered_history = history
+        top3 = self._top3
+        n = self.n
+        # Only normalize the tail we actually need, not the entire input
+        context = self._normalize_tail(history, n - 1)
+        ctx_max = min(n - 1, len(context))
 
-        # Use up to (n-1) characters as context
-        max_context_len = self.n - 1
-        context = filtered_history[-max_context_len:] if len(filtered_history) > 0 else ""
+        # Fast path: try longest context first — if it has 3 candidates, return immediately
+        for ctx_len in range(ctx_max, 0, -1):
+            ctx = context[-ctx_len:]
+            cached = top3.get(ctx)
+            if cached:
+                if len(cached) >= 3:
+                    return cached
+                break  # found a match but < 3 candidates, go to slow path
 
-        # Get candidate characters (from vocab or all seen characters)
-        candidates_set = self.vocab if self.vocab else set(self.unigram_counts.keys())
+        # Slow path: merge across backoff levels (rare)
+        seen = set()
+        out = []
+        for ctx_len in range(ctx_max, 0, -1):
+            ctx = context[-ctx_len:]
+            cached = top3.get(ctx)
+            if not cached:
+                continue
+            for ch in cached:
+                if ch not in seen:
+                    out.append(ch)
+                    seen.add(ch)
+                if len(out) == 3:
+                    return out
 
-        # Calculate probabilities for all candidates
-        char_probs = []
-        for char in candidates_set:
-            prob = self._kneser_ney_prob(context, char)
-            char_probs.append((char, prob))
+        # Fallback to pre-computed unigram top-3
+        for ch in self._unigram_top3:
+            if ch not in seen:
+                out.append(ch)
+                seen.add(ch)
+            if len(out) == 3:
+                return out
 
-        # Sort by probability (descending)
-        char_probs.sort(key=lambda x: x[1], reverse=True)
+        # Final fallback
+        for ch in self.fallback_chars:
+            if ch not in seen:
+                out.append(ch)
+                seen.add(ch)
+            if len(out) == 3:
+                return out
 
-        # Get top 3
-        top_3 = [char for char, _ in char_probs[:3]]
-
-        # Fallback if we don't have enough candidates
-        while len(top_3) < 3:
-            for fallback_char in self.fallback_chars:
-                if fallback_char not in top_3:
-                    top_3.append(fallback_char)
-                    break
-            if len(top_3) >= 3 or len(top_3) >= len(self.fallback_chars):
-                break
-
-        return top_3[:3]
+        while len(out) < 3:
+            out.append('e')
+        return out
 
     def run_pred(self, data):
         preds = []
+        get = self._get_top_candidates
         for inp in data:
-            top_guesses = self._get_top_candidates(inp)
-            preds.append(''.join(top_guesses))
+            preds.append(''.join(get(inp)))
         return preds
 
     @classmethod
     def evaluate(cls, preds, answers, verbose=False):
-        """
-        Evaluate predictions against ground truth answers.
-
-        Args:
-            preds: list of prediction strings (each containing 3 characters)
-            answers: list of answer characters
-            verbose: whether to print detailed results
-        """
         if len(preds) != len(answers):
             print(f"Warning: {len(preds)} predictions but {len(answers)} answers")
 
@@ -290,40 +213,33 @@ class MyModel:
         total = min(len(preds), len(answers))
 
         for i in range(total):
-            pred_chars = preds[i]  # string of 3 predicted chars
-            answer = answers[i].lower()  # ground truth (case-insensitive)
+            pred_chars = preds[i]
+            answer = answers[i].lower()
 
-            # Check if answer is in any of the 3 predictions (case-insensitive)
             if answer in pred_chars.lower():
                 correct += 1
-                if verbose and i < 10:  # show first 10
-                    print(f"✓ Prediction: '{pred_chars}' | Answer: '{answer}'")
+                if verbose and i < 10:
+                    print(f"  Correct: '{pred_chars}' | Answer: '{answer}'")
             else:
                 if verbose and i < 10:
-                    print(f"✗ Prediction: '{pred_chars}' | Answer: '{answer}'")
+                    print(f"  Wrong:   '{pred_chars}' | Answer: '{answer}'")
 
         accuracy = correct / total if total > 0 else 0
         print(f"\n{'='*50}")
         print(f"Correct: {correct}/{total}")
         print(f"Accuracy: {accuracy:.2%}")
         print(f"{'='*50}")
-
         return accuracy
 
     def run_interactive(self):
-        """
-        Interactive mode: continuously predict next character and learn from user input.
-        """
         sys.stdin.reconfigure(encoding='utf-8')
         sys.stdout.reconfigure(encoding='utf-8')
 
         history = ""
         while True:
-            # Get top 3 predictions
             top_3 = self._get_top_candidates(history)
             print(f"{top_3[0]}{top_3[1]}{top_3[2]}", flush=True)
 
-            # Read next character from user
             try:
                 next_char = sys.stdin.read(1)
             except (IOError, EOFError):
@@ -332,81 +248,88 @@ class MyModel:
             if not next_char:
                 break
 
-            # Only update counts if character is in vocabulary (or no vocab filtering)
-            if not self.vocab or next_char in self.vocab:
-                self.unigram_counts[next_char] += 1
-
-                # Update n-gram counts for all orders
+            # Online learning: update counts with normalized text
+            norm_char = self._normalize(next_char)
+            if norm_char:
+                norm_history = self._normalize(history)
+                self.unigram_counts[norm_char] += 1
                 for j in range(1, self.n):
-                    if len(history) >= j:
-                        context = history[-j:]
-                        self.ngram_counts[context][next_char] += 1
+                    if len(norm_history) >= j:
+                        ctx = norm_history[-j:]
+                        self.ngram_counts[ctx][norm_char] += 1
 
-            # Update history (keep recent context)
             history += next_char
-            if len(history) > 1000:  # keep last 1000 chars
+            if len(history) > 1000:
                 history = history[-1000:]
 
     def save(self, work_dir):
-        """Save model checkpoint with all parameters and counts."""
-        model_path = os.path.join(work_dir, 'model.checkpoint')
-        print(f'Saving model to {model_path}')
+        path = os.path.join(work_dir, 'model.checkpoint')
+        print(f'Saving model to {path}')
 
-        with open(model_path, 'wb') as f:
+        # Convert to regular dicts for efficient serialization
+        ngram_dict = {k: dict(v) for k, v in self.ngram_counts.items()}
+
+        with open(path, 'wb') as f:
             pickle.dump({
-                'ngram_counts': self.ngram_counts,
-                'unigram_counts': self.unigram_counts,
-                'continuation_counts': self.continuation_counts,
-                'total_continuation': self.total_continuation,
+                'ngram_counts': ngram_dict,
+                'unigram_counts': dict(self.unigram_counts),
                 'n': self.n,
-                'vocab': self.vocab,
-                'vocab_size': self.vocab_size,
-                'discount': self.discount
-            }, f)
+                'vocab': sorted(self.vocab),
+            }, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        # Print model statistics
-        model_size = os.path.getsize(model_path) / (1024 * 1024)  # MB
-        print(f"Model saved ({model_size:.2f} MB)")
+        size = os.path.getsize(path) / (1024 * 1024)
+        print(f"Model saved ({size:.2f} MB)")
 
     @classmethod
     def load(cls, work_dir):
-        """Load model checkpoint from disk."""
-        model_path = os.path.join(work_dir, 'model.checkpoint')
-        print(f"Loading model from {model_path}...")
+        path = os.path.join(work_dir, 'model.checkpoint')
+        print(f"Loading model from {path}...")
 
         model = MyModel()
 
-        if os.path.exists(model_path):
-            with open(model_path, 'rb') as f:
-                saved_data = pickle.load(f)
+        if os.path.exists(path):
+            with open(path, 'rb') as f:
+                data = pickle.load(f)
 
-                # Load all saved attributes
-                model.ngram_counts = saved_data.get('ngram_counts', saved_data.get('ngram', collections.defaultdict(collections.Counter)))
-                model.unigram_counts = saved_data.get('unigram_counts', saved_data.get('unigram', collections.Counter()))
-                model.continuation_counts = saved_data.get('continuation_counts', collections.defaultdict(collections.Counter))
-                model.total_continuation = saved_data.get('total_continuation', 0)
-                model.n = saved_data.get('n', 4)
-                model.vocab = saved_data.get('vocab', None)
-                model.vocab_size = saved_data.get('vocab_size', 1000)
-                model.discount = saved_data.get('discount', 0.75)
+            model.n = data.get('n', 6)
 
-            print(f"Model loaded: n={model.n}, vocab_size={len(model.vocab) if model.vocab else 'unlimited'}")
+            # Load ngram_counts (handles both old and new format)
+            raw_ngram = data.get('ngram_counts', {})
+            model.ngram_counts = collections.defaultdict(collections.Counter)
+            for ctx, counts in raw_ngram.items():
+                if isinstance(counts, dict):
+                    model.ngram_counts[ctx] = collections.Counter(counts)
+                else:
+                    model.ngram_counts[ctx] = counts
+
+            # Load unigram counts
+            raw_unigram = data.get('unigram_counts', {})
+            if isinstance(raw_unigram, dict):
+                model.unigram_counts = collections.Counter(raw_unigram)
+            else:
+                model.unigram_counts = raw_unigram
+
+            # Load vocab
+            vocab_data = data.get('vocab', [])
+            model.vocab = set(vocab_data) if isinstance(vocab_data, (list, set)) else set()
+
+            print(f"Model loaded: n={model.n}, vocab={len(model.vocab)}, contexts={len(model.ngram_counts)}")
         else:
             print("Warning: No checkpoint found, using empty model.")
 
+        print("Building top-3 prediction cache...")
+        model._build_top3_cache()
         return model
 
 
 if __name__ == '__main__':
     parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
     parser.add_argument('mode', choices=('train', 'test', 'evaluate', 'interactive'),
-                       help='train: train model | test: generate predictions | evaluate: test accuracy | interactive: interactive mode')
+                       help='train | test | evaluate | interactive')
     parser.add_argument('--work_dir', help='directory to save/load model checkpoint', default='work')
     parser.add_argument('--test_data', help='path to local test data file')
-    parser.add_argument('--test_output', help='path to write test predictions (for test mode)', default='pred.txt')
-    parser.add_argument('--n', type=int, default=4, help='n-gram order (3 or 4 recommended)')
-    parser.add_argument('--vocab_size', type=int, default=1000, help='vocabulary size (0 for unlimited)')
-    parser.add_argument('--discount', type=float, default=0.75, help='Kneser-Ney discount parameter')
+    parser.add_argument('--test_output', help='path to write test predictions', default='pred.txt')
+    parser.add_argument('--n', type=int, default=6, help='n-gram order')
     parser.add_argument('--split', choices=('test', 'validation'), default='test',
                        help='Wikitext split for test/evaluate mode')
     parser.add_argument('--max_samples', type=int, default=0, help='limit number of samples (0 for all)')
@@ -416,87 +339,83 @@ if __name__ == '__main__':
     random.seed(0)
 
     if args.mode == 'train':
-        # Create work directory if needed
         if not os.path.isdir(args.work_dir):
             print(f'Creating working directory {args.work_dir}')
             os.makedirs(args.work_dir)
 
-        # Initialize model
-        print(f'Initializing model (n={args.n}, vocab_size={args.vocab_size}, discount={args.discount})')
-        vocab_size = args.vocab_size if args.vocab_size > 0 else None
-        model = MyModel(n=args.n, vocab_size=vocab_size, discount=args.discount)
+        print(f'Initializing model (n={args.n})')
+        model = MyModel(n=args.n)
 
-        # Load training data from Wikitext
         print('Loading Wikitext training data...')
         train_data = MyModel.load_training_data()
 
-        # Train model
         print('Training model...')
         model.run_train(train_data, args.work_dir)
 
-        # Save checkpoint
         print('Saving model checkpoint...')
         model.save(args.work_dir)
 
-        print('✓ Training complete!')
+        print('Training complete!')
 
     elif args.mode == 'test':
-        # Load model
+        t0 = time.perf_counter()
         print('Loading model checkpoint...')
         model = MyModel.load(args.work_dir)
+        t_load = time.perf_counter() - t0
+        print(f'>>> Checkpoint load time: {t_load:.3f}s')
 
-        # Load test data (local file has priority)
-        if args.test_data and os.path.exists(args.test_data):
-            print(f'Reading local test data from {args.test_data}')
-            with open(args.test_data, 'r', encoding='utf-8') as f:
-                test_data = [line.strip() for line in f]
+        # Load test data from file
+        if args.test_data:
+            print(f'Reading test data from {args.test_data}')
+            test_data = MyModel.load_test_data(fpath=args.test_data)
         else:
-            print(f'Loading Wikitext {args.split} split from HuggingFace...')
+            print(f'Loading Wikitext {args.split} split...')
             test_data = MyModel.load_test_data(split=args.split)
 
-        # Limit samples if requested
         if args.max_samples > 0 and len(test_data) > args.max_samples:
             print(f'Limiting to {args.max_samples} samples (from {len(test_data)})')
             test_data = test_data[:args.max_samples]
 
-        # Make predictions
-        print(f'Making predictions on {len(test_data)} samples...')
+        n_samples = len(test_data)
+        print(f'Making predictions on {n_samples} samples...')
+        t1 = time.perf_counter()
         pred = model.run_pred(test_data)
+        t_infer = time.perf_counter() - t1
+        print(f'>>> Inference time: {t_infer:.3f}s ({n_samples} samples, {n_samples/t_infer:.0f} samples/s, {t_infer/n_samples*1000:.3f} ms/sample)')
 
-        # Write predictions to file
         print(f'Writing predictions to {args.test_output}')
         assert len(pred) == len(test_data), f'Expected {len(test_data)} predictions but got {len(pred)}'
         model.write_pred(pred, args.test_output)
 
-        print('✓ Testing complete!')
+        print('Testing complete!')
 
     elif args.mode == 'evaluate':
-        # Load model
+        t0 = time.perf_counter()
         print('Loading model checkpoint...')
         model = MyModel.load(args.work_dir)
+        t_load = time.perf_counter() - t0
+        print(f'>>> Checkpoint load time: {t_load:.3f}s')
 
-        # Load test data and answers from Wikitext
         print(f'Loading Wikitext {args.split} split...')
         test_data = MyModel.load_test_data(split=args.split)
         answers = MyModel.load_test_answers(split=args.split)
 
-        # Limit samples if requested
         if args.max_samples > 0:
             print(f'Limiting to {args.max_samples} samples')
             test_data = test_data[:args.max_samples]
             answers = answers[:args.max_samples]
 
-        # Make predictions
-        print(f'Evaluating on {len(test_data)} samples...')
+        n_samples = len(test_data)
+        print(f'Evaluating on {n_samples} samples...')
+        t1 = time.perf_counter()
         pred = model.run_pred(test_data)
+        t_infer = time.perf_counter() - t1
+        print(f'>>> Inference time: {t_infer:.3f}s ({n_samples} samples, {n_samples/t_infer:.0f} samples/s, {t_infer/n_samples*1000:.3f} ms/sample)')
 
-        # Evaluate accuracy
         accuracy = MyModel.evaluate(pred, answers, verbose=args.verbose)
-
-        print('✓ Evaluation complete!')
+        print('Evaluation complete!')
 
     elif args.mode == 'interactive':
-        # Load model
         print('Loading model checkpoint...')
         model = MyModel.load(args.work_dir)
 
