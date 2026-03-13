@@ -26,9 +26,6 @@ class MyModel:
         self.unigram_counts = collections.Counter()
         self.vocab = set()
         self.fallback_chars = [' ', 'e', 't', 'a', 'o', 'i', 'n', 's', 'r', 'h']
-        # Pre-computed top-3 predictions per context (built after training/loading)
-        self._top3 = {}
-        self._unigram_top3 = []
 
     @staticmethod
     def _normalize(text):
@@ -43,15 +40,8 @@ class MyModel:
         return tail.lower() if ' ' not in tail and '\t' not in tail and '\n' not in tail \
             else MyModel._ws_re.sub(' ', tail.lower())
 
-    def _build_top3_cache(self):
-        """Pre-compute top-3 next chars for every stored context. Call after training or loading."""
-        self._top3 = {}
-        for ctx, counter in self.ngram_counts.items():
-            self._top3[ctx] = [ch for ch, _ in counter.most_common(3)]
-        self._unigram_top3 = [ch for ch, _ in self.unigram_counts.most_common(3)]
-
     @classmethod
-    def load_training_data(cls):
+    def load_training_data(cls, multilingual=False, max_wiki=0, max_per_lang=0):
         """Load training data from Wikitext dataset (requires: pip install datasets)."""
         from datasets import load_dataset
 
@@ -65,6 +55,27 @@ class MyModel:
                 data.append(text)
 
         print(f"Loaded {len(data)} lines from Wikitext training set")
+
+        if max_wiki > 0 and len(data) > max_wiki:
+            print(f"Limiting Wikitext to {max_wiki} lines (from {len(data)})")
+            data = data[:max_wiki]
+
+        if multilingual:
+            for lang in ['es', 'zh']:
+                print(f"Loading multilingual sentences ({lang})...")
+                ds = load_dataset("agentlans/multilingual-sentences", lang, split='train')
+                count = 0
+                for item in ds:
+                    if max_per_lang > 0 and count >= max_per_lang:
+                        break
+                    text = item.get('text', '').strip()
+                    if text:
+                        data.append(text)
+                        count += 1
+                print(f"Loaded {count} lines for {lang}")
+
+            print(f"Total training lines (with multilingual): {len(data)}")
+
         return data
 
     @classmethod
@@ -106,7 +117,7 @@ class MyModel:
             for p in preds:
                 f.write('{}\n'.format(p))
 
-    def run_train(self, data, work_dir):
+    def run_train(self, data, work_dir, min_count=0):
         total = len(data)
         print(f"Training on {total} lines...")
         t_start = time.perf_counter()
@@ -138,47 +149,41 @@ class MyModel:
         print(f"Unique contexts: {len(self.ngram_counts)}")
         print(f"Total chars: {total_chars:,}")
 
-        t_cache = time.perf_counter()
-        print("Building top-3 prediction cache...")
-        self._build_top3_cache()
-        print(f"Cache built in {time.perf_counter() - t_cache:.2f}s")
+        if min_count > 1:
+            before = len(self.ngram_counts)
+            to_delete = [ctx for ctx, counter in self.ngram_counts.items()
+                         if sum(counter.values()) < min_count]
+            for ctx in to_delete:
+                del self.ngram_counts[ctx]
+            print(f"Pruned contexts with total count < {min_count}: {before} -> {len(self.ngram_counts)} ({before - len(self.ngram_counts)} removed)")
+
 
     def _get_top_candidates(self, history):
         """
-        Fast top-3 prediction using pre-computed cache with backoff.
+        Top-3 prediction with backoff, using lazy most_common() lookups.
         """
-        top3 = self._top3
         n = self.n
-        # Only normalize the tail we actually need, not the entire input
+        ngram_counts = self.ngram_counts
         context = self._normalize_tail(history, n - 1)
         ctx_max = min(n - 1, len(context))
 
-        # Fast path: try longest context first — if it has 3 candidates, return immediately
-        for ctx_len in range(ctx_max, 0, -1):
-            ctx = context[-ctx_len:]
-            cached = top3.get(ctx)
-            if cached:
-                if len(cached) >= 3:
-                    return cached
-                break  # found a match but < 3 candidates, go to slow path
-
-        # Slow path: merge across backoff levels (rare)
         seen = set()
         out = []
+
         for ctx_len in range(ctx_max, 0, -1):
             ctx = context[-ctx_len:]
-            cached = top3.get(ctx)
-            if not cached:
+            dist = ngram_counts.get(ctx)
+            if not dist:
                 continue
-            for ch in cached:
+            for ch, _ in dist.most_common():
                 if ch not in seen:
                     out.append(ch)
                     seen.add(ch)
                 if len(out) == 3:
                     return out
 
-        # Fallback to pre-computed unigram top-3
-        for ch in self._unigram_top3:
+        # Fallback to unigram
+        for ch, _ in self.unigram_counts.most_common():
             if ch not in seen:
                 out.append(ch)
                 seen.add(ch)
@@ -317,8 +322,6 @@ class MyModel:
         else:
             print("Warning: No checkpoint found, using empty model.")
 
-        print("Building top-3 prediction cache...")
-        model._build_top3_cache()
         return model
 
 
@@ -333,6 +336,10 @@ if __name__ == '__main__':
     parser.add_argument('--split', choices=('test', 'validation'), default='test',
                        help='Wikitext split for test/evaluate mode')
     parser.add_argument('--max_samples', type=int, default=0, help='limit number of samples (0 for all)')
+    parser.add_argument('--max_train', type=int, default=0, help='limit number of training lines (0 for all)')
+    parser.add_argument('--multilingual', action='store_true', help='include Spanish and Chinese training data')
+    parser.add_argument('--max_per_lang', type=int, default=0, help='max lines per multilingual language (0 for all)')
+    parser.add_argument('--min_count', type=int, default=0, help='prune contexts with total count below this')
     parser.add_argument('--verbose', action='store_true', help='verbose output for evaluation')
     args = parser.parse_args()
 
@@ -346,11 +353,11 @@ if __name__ == '__main__':
         print(f'Initializing model (n={args.n})')
         model = MyModel(n=args.n)
 
-        print('Loading Wikitext training data...')
-        train_data = MyModel.load_training_data()
+        print('Loading training data...')
+        train_data = MyModel.load_training_data(multilingual=args.multilingual, max_wiki=args.max_train, max_per_lang=args.max_per_lang)
 
         print('Training model...')
-        model.run_train(train_data, args.work_dir)
+        model.run_train(train_data, args.work_dir, min_count=args.min_count)
 
         print('Saving model checkpoint...')
         model.save(args.work_dir)
