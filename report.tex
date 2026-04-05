@@ -1,0 +1,63 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in,letterpaper]{geometry}
+\usepackage{times}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{titlesec}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{4pt}
+
+\titleformat{\section}{\normalsize\bfseries}{}{0em}{}
+\titlespacing*{\section}{0pt}{6pt}{2pt}
+
+\title{\vspace{-2.5em}CSE 447 Project Report: Character Prediction via N-Gram Models}
+\author{Team [Your Team Name]}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2.5em}
+
+\section*{Approach}
+
+Our system predicts the next character using a character-level $n$-gram model with backoff smoothing. Under the Markov assumption, the probability of the next character $c_{i+1}$ depends only on a fixed window of preceding characters: $P(c_{i+1} \mid c_1, \dots, c_i) \approx P(c_{i+1} \mid c_{i-k+1}, \dots, c_i)$. We estimate these conditional probabilities via maximum likelihood: $\hat{P}(c \mid \text{ctx}) = \frac{\text{count}(\text{ctx}, c)}{\sum_{c'} \text{count}(\text{ctx}, c')}$, collecting counts for all context lengths from 1 to $n{-}1$ in hash maps for O(1) lookup.
+
+At prediction time, we use backoff: starting from the longest context ($n{-}1$ characters), we return the top-3 most frequent next characters. If unseen or insufficient, we shorten the context, merging candidates across levels until reaching the unigram distribution, then a hardcoded frequency-ranked fallback list. All text is lowercased with collapsed whitespace; only the last $n{-}1$ characters are normalized at inference.
+
+\section*{Optimization}
+
+At Checkpoint 3, our system recorded 22.4s on the grader despite sub-second local inference. The grader measures total time including Docker startup and checkpoint loading. Our pre-computed top-3 cache iterated all contexts at load time---fast per query, but costly upfront over millions of contexts. Removing this for lazy \texttt{most\_common()} lookups reduced load from 12s to under 5s with no accuracy loss.
+
+We investigated $n$-gram order: $n{=}7$ improved accuracy (62.5\% $\to$ 65.8\%) but tripled contexts (2.5M $\to$ 7.4M) and checkpoint size (59\,MB $\to$ 164\,MB), so we fixed $n{=}6$. We then progressively reduced English data (1.16M $\to$ 500K $\to$ 300K lines) with accuracy stable throughout (62.5\% $\to$ 62.3\% $\to$ 62.6\%), confirming character-level statistics saturate early.
+
+For multilingual support, we added Spanish and Chinese data. Uncapped Chinese (280K lines) exploded the model to 723\,MB due to the large CJK character inventory. Capping at 30K lines per language and pruning contexts with count $< 3$ removed 80\% of rare contexts. Final model: 360K lines, 38\,MB checkpoint, 2.3s load, 62.3\% English accuracy with multilingual coverage.
+
+\section*{Dataset}
+
+We use Wikitext-103-raw-v1 \cite{wikitext} for English: text from verified Good and Featured Wikipedia articles spanning history, science, geography, and biography. We use 300K lines ($\sim$137M characters). For multilingual data, we use \texttt{agentlans/multilingual-sentences} \cite{multilingual}, derived from the LinguaNova corpus, cleaned with textacy and language-verified with Google CLD3. We use 30K lines each of Spanish (\texttt{es}) and Chinese (\texttt{zh}).
+
+\section*{Evaluation}
+
+Top-3 accuracy on the Wikitext-103 validation split (2,461 samples): a prediction is correct if the true next character appears among the three candidates (case-insensitive), mirroring the astronaut selection interface.
+
+\section*{Libraries and Packages}
+
+Python standard library for data structures and serialization; HuggingFace \texttt{datasets} for downloading training and evaluation data; \texttt{tqdm} for progress visualization; \texttt{zstandard} for decompressing multilingual dataset files; Docker for containerized, reproducible grading.
+
+\begin{thebibliography}{2}
+
+\bibitem{wikitext}
+Salesforce Research.
+\newblock WikiText Dataset.
+\newblock \url{https://huggingface.co/datasets/Salesforce/wikitext}
+
+\bibitem{multilingual}
+agentlans.
+\newblock High Quality Multilingual Sentences Dataset.
+\newblock \url{https://huggingface.co/datasets/agentlans/multilingual-sentences}
+
+\end{thebibliography}
+
+\end{document}

@@ -1,0 +1,45 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in,letterpaper]{geometry}
+\usepackage{times}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\title{\vspace{-2em}Data Statement}
+\author{Team [Your Team Name]}
+\date{}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\textbf{Data Source.}
+We use two datasets from HuggingFace: (1) \textit{Wikitext-103-raw-v1} by Salesforce Research, derived from verified Good and Featured articles on English Wikipedia; (2) \textit{agentlans/multilingual-sentences} by Alan Tseng, derived from the LinguaNova multilingual dataset, covering 50 languages with $\sim$9.74M sentences. The data was cleaned using textacy (removing HTML, URLs, emojis), language-detected with Google CLD3, and segmented with PyICU.
+
+\textbf{Data Size.}
+Total training data: 360K lines. English (Wikitext): 300K lines ($\sim$137M characters). Spanish: 30K lines. Chinese: 30K lines. After training, contexts with total count $< 3$ are pruned, reducing stored contexts from 5.3M to 1.03M (38\,MB checkpoint).
+
+\textbf{Preprocessing Procedure.}
+All text is lowercased and whitespace is collapsed to single spaces using regex substitution. Empty lines are discarded. No tokenization is applied, as the model operates at the character level. For the multilingual dataset, we load the \texttt{text} field directly. Context pruning removes $n$-gram entries observed fewer than 3 times to control model size, particularly for Chinese where the large character inventory creates many rare contexts.
+
+\textbf{Curation Rationale.}
+Wikitext-103 was chosen for its clean, well-edited English prose covering diverse topics. We selected 300K lines (from 1.16M available) after empirical validation that character-level $n$-gram statistics saturate at this scale. Spanish and Chinese were added to support the multilingual requirement of the task, chosen as representative of Latin-script and logographic writing systems respectively. Each was capped at 30K lines to prevent checkpoint bloat.
+
+\textbf{Language Variety.}
+English (en), Spanish (es), Chinese (zh).
+
+\textbf{Speaker Demographics.}
+Wikitext-103 is written by Wikipedia editors---a population skewed toward English-speaking, college-educated males aged 18--40 (Wikimedia Foundation surveys). The multilingual sentences dataset is derived from LinguaNova, a web-crawled multilingual corpus; original authors are unknown and diverse. We were unable to measure exact demographic breakdowns for either source; with sufficient resources, one could cross-reference Wikipedia contributor profiles with survey data or analyze the web domains in LinguaNova's crawl.
+
+\textbf{Speech Situation.}
+All texts are written (not spoken or signed), edited and curated (not spontaneous), and intended for public audiences. Wikipedia articles are encyclopedic reference material; multilingual sentences are web-crawled text filtered for quality and language reliability.
+
+\textbf{Text Characteristics.}
+English: encyclopedic articles spanning history, science, geography, culture, and biography. Spanish and Chinese: web-crawled sentences covering diverse everyday topics, filtered for quality and language reliability.
+
+\textbf{Ethical Considerations.}
+Both datasets are publicly available under permissive licenses. Wikitext-103 uses Wikipedia content under CC BY-SA 3.0. The multilingual sentences dataset is derived from LinguaNova; no explicit license is stated on the dataset card---users should verify with the dataset creator. No private or personally identifiable data was used. Wikipedia text may reflect systemic biases in topic coverage and perspective; the multilingual dataset may underrepresent certain dialects or registers within each language.
+
+\end{document}
